@@ -1,8 +1,8 @@
 """
 RunPod Serverless Handler — FaceFusion HyperSwap 256 Face Swap
 
-Drop-in replacement for the inswapper RunPod worker.
-Same input/output format: source_image + target_image → swapped image as base64.
+Uses official facefusion/facefusion:3.6.0-cuda image.
+Same input/output format as inswapper: source_image + target_image → swapped image as base64.
 """
 
 import os
@@ -46,7 +46,7 @@ def handler(job):
     # Config — compatible with existing worker params
     model = job_input.get("model", "hyperswap_1c_256")
     face_restore = job_input.get("face_restore", True)
-    face_enhancer_model = job_input.get("face_enhancer_model", "codeformer")  # "codeformer" or "gfpgan_1.4"
+    face_enhancer_model = job_input.get("face_enhancer_model", "codeformer")
     codeformer_fidelity = job_input.get("codeformer_fidelity", 0.7)
 
     job_id = str(uuid.uuid4())[:8]
@@ -62,6 +62,7 @@ def handler(job):
         decode_base64_image(target_image, target_path)
 
         # Build FaceFusion headless-run command
+        # Official image uses: python facefusion.py headless-run
         cmd = [
             sys.executable, os.path.join(FACEFUSION_DIR, "facefusion.py"),
             "headless-run",
@@ -74,11 +75,12 @@ def handler(job):
             "--face-detector-score", "0.3",
             "--output-image-quality", "95",
             "--execution-providers", "cuda",
+            "--skip-download",  # Models should already be in image
         ]
 
         # Add face enhancer if requested
         if face_restore:
-            # Insert face_enhancer after face_swapper in processors list
+            # Insert face_enhancer after face_swapper
             proc_idx = cmd.index("--processors") + 1
             cmd.insert(proc_idx + 1, "face_enhancer")
             cmd.extend([
@@ -86,27 +88,28 @@ def handler(job):
                 "--face-enhancer-blend", str(int(codeformer_fidelity * 100)),
             ])
 
-        print(f"[HyperSwap] Job {job_id}: running FaceFusion...")
-        print(f"[HyperSwap] CMD: {' '.join(cmd[:15])}...")
+        print(f"[HyperSwap] Job {job_id}: running FaceFusion {model}...")
+        print(f"[HyperSwap] CMD: {' '.join(cmd[:20])}...")
 
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,
             cwd=FACEFUSION_DIR,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": "0"},
         )
 
         if result.returncode != 0:
-            stderr = result.stderr[-500:] if result.stderr else ""
-            stdout = result.stdout[-500:] if result.stdout else ""
+            stderr = result.stderr[-1000:] if result.stderr else ""
+            stdout = result.stdout[-1000:] if result.stdout else ""
             print(f"[HyperSwap] FAILED (exit {result.returncode})")
             print(f"[HyperSwap] stderr: {stderr}")
             print(f"[HyperSwap] stdout: {stdout}")
-            return {"error": f"FaceFusion exit {result.returncode}: {stderr[-200:]}"}
+            return {"error": f"FaceFusion exit {result.returncode}: {stderr[-300:] or stdout[-300:]}"}
 
         if not os.path.exists(output_path):
-            return {"error": f"No output file. stdout: {result.stdout[-200:]}"}
+            return {"error": f"No output file. stdout: {result.stdout[-300:]}"}
 
         image_b64 = encode_image_base64(output_path)
         elapsed = time.time() - t0
